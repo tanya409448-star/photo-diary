@@ -289,12 +289,27 @@ body.no-tab .tabbar{display:none}
 .cam{position:fixed;inset:0;z-index:75;background:#0B0A08;display:flex;flex-direction:column;color:#fff}
 .cam-top{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 12px 6px}
 .cam-title{flex:1;text-align:center;font-size:13.5px;color:rgba(255,255,255,.72)}
-.cam-close{width:44px;height:44px;border-radius:14px;font-size:20px;color:#fff;display:grid;place-items:center;background:rgba(255,255,255,.08)}
+.cam-close{width:52px;height:44px;border-radius:14px;font-size:20px;color:#fff;display:grid;place-items:center;background:rgba(255,255,255,.08)}
 .cam-close:active{background:rgba(255,255,255,.2)}
+.cam-flip{width:52px;height:44px;border-radius:14px;background:rgba(255,255,255,.08);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
+.cam-flip:active{background:rgba(255,255,255,.2)}
+.cam-flip[disabled]{opacity:.4}
+.cam-flip .flip-tx{font-size:9.5px;line-height:1;color:rgba(255,255,255,.7);margin-top:-1px}
 .cam-stage{flex:1;position:relative;display:grid;place-items:center;min-height:0;overflow:hidden}
 .cam-stage video{width:100%;height:100%;object-fit:cover;background:#000;display:block}
+.cam-stage video.mirror{transform:scaleX(-1)}
+.cam-mode{position:absolute;top:10px;left:12px;padding:5px 11px;border-radius:999px;background:rgba(12,10,8,.55);font-size:11.5px;color:rgba(255,255,255,.92)}
+.cam-flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .3s ease-out}
+.cam-flash.on{opacity:.9;transition:none}
 .cam-msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:14px;line-height:1.6;color:rgba(255,255,255,.82)}
-.cam-bottom{display:flex;align-items:center;justify-content:center;padding:18px 0 calc(env(safe-area-inset-bottom) + 22px)}
+.cam-strip{display:flex;align-items:center;gap:10px;padding:10px 16px 0;min-height:46px}
+.cam-count{font-size:12.5px;color:rgba(255,255,255,.74);white-space:nowrap}
+.cam-thumbs{display:flex;align-items:center;gap:6px;flex:1;min-height:44px;overflow-x:auto;justify-content:flex-end}
+.cam-thumbs img{width:44px;height:44px;object-fit:cover;border-radius:10px;border:1px solid rgba(255,255,255,.28);flex:0 0 auto}
+.cam-thumbs .slot{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.1);display:grid;place-items:center;font-size:10px;color:rgba(255,255,255,.62);flex:0 0 auto}
+.cam-bottom{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;justify-items:center;padding:12px 18px calc(env(safe-area-inset-bottom) + 18px)}
+.cam-done{justify-self:start;height:44px;padding:0 20px;border-radius:22px;background:rgba(255,255,255,.14);color:#fff;font-size:14px;font-weight:600}
+.cam-done:active{background:rgba(255,255,255,.26)}
 .shutter{width:74px;height:74px;border-radius:50%;border:4px solid rgba(255,255,255,.85);background:rgba(255,255,255,.22);display:grid;place-items:center}
 .shutter::after{content:'';width:56px;height:56px;border-radius:50%;background:#fff;display:block}
 .shutter:active{background:rgba(255,255,255,.5)}
@@ -373,7 +388,7 @@ body.no-tab .tabbar{display:none}
    ============================================================ */
 
 /* ---------- 상수 ---------- */
-var APP_VERSION = '1.1.0';
+var APP_VERSION = '1.2.0';
 var DB_NAME = 'photo-diary';
 var DB_VER = 1;
 var THUMB_MAX = 480;
@@ -1369,18 +1384,22 @@ function cameraFallback(msg){
   var input = $('#file-capture');
   if (input) setTimeout(function(){ try { input.click(); } catch (e) {} }, 80);
 }
+/* 카메라 스트림은 찍는 동안 계속 열어 두고, 닫을 때 한 번에 정리한다.
+ * (예전에는 한 장 찍을 때마다 스트림을 끊어서 연속 촬영이 안 됐다)
+ */
 function stopCamera(){
   if (!cam) return;
   try {
     if (cam.stream) cam.stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} });
   } catch (e) {}
   try { if (cam.video) cam.video.srcObject = null; } catch (e) {}
+  try { (cam.urls || []).forEach(function(u){ try { URL.revokeObjectURL(u); } catch (e) {} }); } catch (e) {}
   try { if (cam.el && cam.el.parentNode) cam.el.parentNode.removeChild(cam.el); } catch (e) {}
   document.removeEventListener('keydown', camKeys);
   cam = null;
   camBusy = false;
 }
-/* 카메라를 닫으면(✕·촬영 후) 쌓아 둔 히스토리 한 칸도 같이 되돌린다 */
+/* 카메라를 닫으면(✕·완료·뒤로 가기) 쌓아 둔 히스토리 한 칸도 같이 되돌린다 */
 function closeCamera(){
   var pushed = !!(cam && cam.historyPushed);
   stopCamera();
@@ -1389,6 +1408,87 @@ function closeCamera(){
 function camKeys(e){
   if (!cam) return;
   if (e.key === 'Escape') closeCamera();
+}
+/* facingMode 를 그대로 못 받는 기기를 위해 한 번 더 넓게 요청한다 */
+async function camGetStream(mode){
+  try {
+    // 고화소 스트림은 그 자체로 메모리를 많이 쓰므로 1920 이하로 요청한다
+    return await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: mode }, width: { ideal: 1920 }, height: { ideal: 1920 } }
+    });
+  } catch (err) {
+    var name = (err && err.name) || '';
+    if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'NotReadableError') throw err;
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+  }
+}
+function camApplyMode(mode){
+  if (!cam) return;
+  cam.facing = mode;
+  // 셀카는 미리보기만 거울처럼 보여 준다(저장되는 사진은 실제 방향 그대로)
+  if (cam.video) cam.video.classList.toggle('mirror', mode === 'user');
+  var lab = $('#cam-mode');
+  if (lab) lab.textContent = mode === 'user' ? '셀카' : '후면 카메라';
+  var flip = $('#cam-flip');
+  if (flip) flip.setAttribute('aria-label', mode === 'user' ? '후면 카메라로 전환' : '셀카 카메라로 전환');
+}
+async function switchCamera(){
+  if (!cam || cam.switching || camBusy) return;
+  var prev = cam.facing;
+  var next = prev === 'user' ? 'environment' : 'user';
+  cam.switching = true;
+  var flip = $('#cam-flip'); if (flip) flip.disabled = true;
+  var shot = $('#cam-shot'); if (shot) shot.disabled = true;
+  var msg = $('#cam-msg');
+  if (msg) { msg.textContent = '카메라를 전환하고 있어요…'; msg.hidden = false; }
+  // 기기에 따라 두 카메라를 동시에 열지 못하므로 지금 트랙을 먼저 끝낸다
+  try { if (cam.stream) cam.stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} }); } catch (e) {}
+  if (cam.video) { try { cam.video.srcObject = null; } catch (e) {} }
+  try {
+    var stream = await camGetStream(next);
+    if (!cam) { stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} }); return; }
+    cam.stream = stream;
+    cam.video.srcObject = stream;
+    try { await cam.video.play(); } catch (e) {}
+    if (msg) msg.hidden = true;
+    camApplyMode(next);
+  } catch (err) {
+    console.error('카메라 전환 실패', err);
+    var back = null;
+    try { back = await camGetStream(prev); } catch (e2) { back = null; }
+    if (!cam) {
+      if (back) back.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} });
+      return;
+    }
+    if (back) {
+      cam.stream = back;
+      cam.video.srcObject = back;
+      try { await cam.video.play(); } catch (e) {}
+      if (msg) msg.hidden = true;
+      camApplyMode(prev);
+      toast('이 기기에서는 카메라를 전환하지 못했어요.', 3200);
+    } else if (msg) {
+      msg.textContent = '카메라를 다시 열지 못했어요. 닫았다가 다시 열어 주세요.';
+      toast('카메라를 전환하지 못했어요.', 3200);
+    }
+  } finally {
+    if (cam) {
+      cam.switching = false;
+      var f2 = $('#cam-flip'); if (f2) f2.disabled = false;
+      var s2 = $('#cam-shot'); if (s2 && cam.stream) s2.disabled = false;
+    }
+  }
+}
+function camCountText(){
+  var c = $('#cam-count');
+  if (c) c.textContent = ((cam && cam.saved) || 0) + '장 저장됨';
+}
+function camFlash(){
+  var f = $('#cam-flash');
+  if (!f) return;
+  f.classList.add('on');
+  setTimeout(function(){ f.classList.remove('on'); }, 90);
 }
 async function openCamera(){
   if (cam) return;
@@ -1405,36 +1505,44 @@ async function openCamera(){
     '<div class="cam-top">' +
       '<button class="cam-close" id="cam-close" aria-label="카메라 닫기">✕</button>' +
       '<span class="cam-title">사진 찍기</span>' +
-      '<span style="width:44px" aria-hidden="true"></span>' +
+      '<button class="cam-flip" id="cam-flip" aria-label="셀카·후면 카메라 전환">' +
+        '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a8 8 0 0 1 13.6-2.9L20 8.6"/><path d="M20 4.6v4h-4"/><path d="M20 15a8 8 0 0 1-13.6 2.9L4 15.4"/><path d="M4 19.4v-4h4"/></svg>' +
+        '<span class="flip-tx">전환</span>' +
+      '</button>' +
     '</div>' +
     '<div class="cam-stage">' +
       '<video id="cam-video" playsinline autoplay muted></video>' +
+      '<div class="cam-flash" id="cam-flash"></div>' +
+      '<span class="cam-mode" id="cam-mode">후면 카메라</span>' +
       '<div class="cam-msg" id="cam-msg">카메라를 준비하고 있어요…</div>' +
     '</div>' +
+    '<div class="cam-strip">' +
+      '<span class="cam-count" id="cam-count">0장 저장됨</span>' +
+      '<div class="cam-thumbs" id="cam-thumbs"></div>' +
+    '</div>' +
     '<div class="cam-bottom">' +
+      '<button class="cam-done" id="cam-done">완료</button>' +
       '<button class="shutter" id="cam-shot" aria-label="촬영" disabled></button>' +
+      '<span aria-hidden="true"></span>' +
     '</div>';
   document.body.appendChild(el);
-  cam = { el: el, stream: null, video: $('#cam-video'), date: date, historyPushed: false };
+  cam = {
+    el: el, stream: null, video: $('#cam-video'), date: date, historyPushed: false,
+    facing: 'environment', saved: 0, urls: [], switching: false
+  };
   // 안드로이드 뒤로 가기가 카메라만 닫도록 히스토리에 한 칸을 남긴다
   try {
     history.pushState({ record: date, camera: true }, '', '#day=' + date);
     cam.historyPushed = true;
   } catch (e) { cam.historyPushed = false; }
   $('#cam-close').addEventListener('click', closeCamera);
+  $('#cam-done').addEventListener('click', closeCamera);
+  $('#cam-flip').addEventListener('click', switchCamera);
   $('#cam-shot').addEventListener('click', takeShot);
   document.addEventListener('keydown', camKeys);
   try {
-    // 고화소 스트림은 그 자체로 메모리를 많이 쓰므로 1920 이하로 요청한다
-    var stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1920 },
-        height: { ideal: 1920 }
-      }
-    });
-    if (!cam) { // 여는 동안 닫렸으면 바로 정리
+    var stream = await camGetStream('environment');
+    if (!cam) { // 여는 동안 닫혔으면 바로 정리
       stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} });
       return;
     }
@@ -1445,6 +1553,7 @@ async function openCamera(){
     if (msg) msg.hidden = true;
     var shot = $('#cam-shot');
     if (shot) shot.disabled = false;
+    camApplyMode('environment');
   } catch (err) {
     var name = (err && err.name) || '';
     var text;
@@ -1459,6 +1568,8 @@ async function openCamera(){
     cameraFallback(text);
   }
 }
+/* 셔터 한 번 = 사진 한 장. 카메라는 열어 둔 채로 바로 IndexedDB에 저장해
+ * 다시 누르면 다음 장을 이어서 찍는다. */
 async function takeShot(){
   if (!cam || camBusy) return;
   var v = cam.video;
@@ -1482,15 +1593,23 @@ async function takeShot(){
   ctx.fillRect(0, 0, cw, ch);
   if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(v, 0, 0, cw, ch);
+  camFlash(); // 셔터가 눌린 것을 바로 알 수 있게
   var blob = await new Promise(function(resolve){
     canvas.toBlob(function(b){ resolve(b); }, 'image/jpeg', PHOTO_Q);
   });
-  canvas.width = canvas.height = 0;
-  var hadHistory = !!(cam && cam.historyPushed);
-  stopCamera(); // 찍자마자 카메라 메모리를 돌려준다
-  if (hadHistory) { try { history.back(); } catch (e) {} }
-  if (!blob) { toast('사진을 담지 못했어요. 다시 찍어 주세요.'); return; }
-  showBusy('사진 저장 중…');
+  canvas.width = canvas.height = 0; // 캔버스 메모리 즉시 해제
+  if (!cam) { camBusy = false; return; } // 찍는 사이 닫혔으면 그만
+  if (!blob) {
+    camBusy = false;
+    if (shotBtn) shotBtn.disabled = false;
+    toast('사진을 담지 못했어요. 다시 찍어 주세요.');
+    return;
+  }
+  var slot = document.createElement('span');
+  slot.className = 'slot';
+  slot.textContent = '저장';
+  var thumbs = $('#cam-thumbs');
+  if (thumbs) thumbs.appendChild(slot);
   try {
     var thumb = null;
     try { thumb = await makeThumb(blob); } catch (e) { thumb = null; }
@@ -1499,16 +1618,35 @@ async function takeShot(){
     var meta = { id: id, date: date, order: order, caption: '', thumb: thumb };
     S.recordPhotos.push(meta);
     S.photoIndex.push(meta);
-    hideBusy();
     if (S.view === 'record' && S.recordDate === date) {
       renderPhotoGrid();
       await saveOrderValues(normalizeOrders());
     }
-    toast('1장을 담았어요.');
+    if (!cam) return; // 저장하는 사이 닫혔으면 화면에 표시할 곳이 없다
+    cam.saved = (cam.saved || 0) + 1;
+    camCountText();
+    if (slot.parentNode) {
+      if (thumb) {
+        var u = URL.createObjectURL(thumb);
+        cam.urls.push(u);
+        var img = document.createElement('img');
+        img.src = u;
+        img.alt = '방금 찍은 사진 ' + cam.saved;
+        slot.parentNode.replaceChild(img, slot);
+      } else {
+        slot.parentNode.removeChild(slot);
+      }
+    }
   } catch (e) {
     console.error('촬영 저장 실패', e);
-    hideBusy();
+    if (slot.parentNode) slot.parentNode.removeChild(slot);
     toast('사진을 저장하지 못했어요. 휴대폰 저장 공간을 확인해 주세요.');
+  } finally {
+    camBusy = false;
+    if (cam) {
+      var b = $('#cam-shot');
+      if (b && cam.stream) b.disabled = false;
+    }
   }
 }
 
@@ -2135,6 +2273,7 @@ async function boot(){
 /* 테스트에서 내부 상태를 확인할 수 있도록 최소한만 노출 (사용에는 영향 없음) */
 window.__diary = {
   state: S,
+  version: APP_VERSION,
   koreanDate: koreanDate,
   todayStr: todayStr,
   reloadAll: reloadAll
