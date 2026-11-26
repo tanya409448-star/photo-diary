@@ -680,14 +680,22 @@ loadPrefs();
  * 같은 초에 여러 장 찍어도 순번이 올라가 이름이 겹치지 않는다.
  * (브라우저도 같은 이름이 있으면 (1)을 붙여 준다)
  */
-function photoFileName(date){
+function photoExt(blob){
+  // 카메라·불러오기는 JPEG로 저장되지만, 변환되지 않은 사진(HEIC 등)은 원본 형식을 따른다
+  var t = String((blob && blob.type) || '').toLowerCase();
+  if (t === 'image/png') return 'png';
+  if (t === 'image/webp') return 'webp';
+  if (t === 'image/heic' || t === 'image/heif') return 'heic';
+  return 'jpg';
+}
+function photoFileName(date, blob){
   var now = new Date();
   var day = String(date || '').replace(/[^0-9]/g, '');
   if (day.length !== 8) day = ymd(now).replace(/-/g, '');
   var sec = pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds());
   if (sec !== dlLastSec) { dlLastSec = sec; dlSecCount = 0; }
   dlSecCount += 1;
-  return '다이어리-' + day + '-' + sec + '-' + pad2(dlSecCount) + '.jpg';
+  return '다이어리-' + day + '-' + sec + '-' + pad2(dlSecCount) + '.' + photoExt(blob);
 }
 /* 파일 하나를 내려받는다. objectURL 은 충분히(10초) 뒤에 해제한다. */
 function downloadBlob(blob, name){
@@ -1698,7 +1706,7 @@ async function takeShot(){
   // 썸네일·IndexedDB 저장을 기다리지 않고 지금 내려받아야
   // 브라우저가 '사용자 조작'으로 인정해 연속 촬영에서도 다운로드가 막히지 않는다.
   var galleryName = '';
-  if (prefs.gallerySave) galleryName = downloadBlob(blob, photoFileName(date));
+  if (prefs.gallerySave) galleryName = downloadBlob(blob, photoFileName(date, blob));
   var slot = document.createElement('span');
   slot.className = 'slot';
   slot.textContent = '저장';
@@ -1804,7 +1812,7 @@ async function lbSaveToGallery(){
   try {
     var rec = await getOne('photos', p.id);
     if (!rec || !rec.blob) throw new Error('사진을 찾지 못했습니다');
-    var name = downloadBlob(rec.blob, photoFileName(p.date || rec.date));
+    var name = downloadBlob(rec.blob, photoFileName(p.date || rec.date, rec.blob));
     if (!name) throw new Error('내려받기를 시작하지 못했습니다');
     var tx = $('#lb-save-tx');
     if (tx) {
