@@ -3,7 +3,7 @@
  * 파일을 고칠 때는 아래 CACHE_VERSION 을 올리세요 (예: v1 → v2).
  * 사진과 기록은 IndexedDB에 있어서 이 캐시와는 별개입니다.
  */
-const CACHE_VERSION = 'photo-diary-v1';
+const CACHE_VERSION = 'photo-diary-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -29,6 +29,11 @@ self.addEventListener('activate', (event) => {
       ))
       .then(() => self.clients.claim())
   );
+});
+
+// 페이지가 새 버전으로 바꾸자고 하면 바로 넘긴다
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {

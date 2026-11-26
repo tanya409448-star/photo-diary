@@ -285,6 +285,21 @@ body.no-tab .tabbar{display:none}
 .lb-navrow button:disabled{opacity:.25}
 .lb-navrow .mid{font-size:12.5px;color:rgba(255,255,255,.55);min-width:46px;text-align:center}
 
+/* ---------- 앱 안 카메라 ---------- */
+.cam{position:fixed;inset:0;z-index:75;background:#0B0A08;display:flex;flex-direction:column;color:#fff}
+.cam-top{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 12px 6px}
+.cam-title{flex:1;text-align:center;font-size:13.5px;color:rgba(255,255,255,.72)}
+.cam-close{width:44px;height:44px;border-radius:14px;font-size:20px;color:#fff;display:grid;place-items:center;background:rgba(255,255,255,.08)}
+.cam-close:active{background:rgba(255,255,255,.2)}
+.cam-stage{flex:1;position:relative;display:grid;place-items:center;min-height:0;overflow:hidden}
+.cam-stage video{width:100%;height:100%;object-fit:cover;background:#000;display:block}
+.cam-msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:14px;line-height:1.6;color:rgba(255,255,255,.82)}
+.cam-bottom{display:flex;align-items:center;justify-content:center;padding:18px 0 calc(env(safe-area-inset-bottom) + 22px)}
+.shutter{width:74px;height:74px;border-radius:50%;border:4px solid rgba(255,255,255,.85);background:rgba(255,255,255,.22);display:grid;place-items:center}
+.shutter::after{content:'';width:56px;height:56px;border-radius:50%;background:#fff;display:block}
+.shutter:active{background:rgba(255,255,255,.5)}
+.shutter[disabled]{opacity:.4}
+
 /* ---------- modal / sheet / toast ---------- */
 .backdrop{position:fixed;inset:0;background:rgba(24,18,12,.45);z-index:80;display:flex;align-items:flex-end;justify-content:center}
 .backdrop.center{align-items:center;padding:20px}
@@ -358,11 +373,14 @@ body.no-tab .tabbar{display:none}
    ============================================================ */
 
 /* ---------- 상수 ---------- */
-var APP_VERSION = '1.0.0';
+var APP_VERSION = '1.1.0';
 var DB_NAME = 'photo-diary';
 var DB_VER = 1;
 var THUMB_MAX = 480;
 var THUMB_Q = 0.82;
+var PHOTO_MAX = 1920;   // 저장하는 사진의 최대 변(고화소 원본은 이 크기로 줄여 저장)
+var PHOTO_Q = 0.88;     // 저장 사진 JPEG 품질
+var CAPTURE_MAX = 1600; // 앱 안 카메라로 찍은 사진의 최대 변
 var WEEK = ['일','월','화','수','목','금','토'];
 var NOIMG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.6" width="17" height="14.8" rx="3.2"/><circle cx="9" cy="10" r="1.4"/><path d="M4.6 17.6l4.1-4.1 3.3 3.3 2.5-2.5 3.9 3.9"/></svg>';
 
@@ -584,6 +602,9 @@ function forgetThumb(id){
   if (thumbUrls[id]) { try { URL.revokeObjectURL(thumbUrls[id]); } catch(e){} delete thumbUrls[id]; }
   if (fullUrls[id]) { try { URL.revokeObjectURL(fullUrls[id]); } catch(e){} delete fullUrls[id]; }
 }
+function forgetFull(id){
+  if (fullUrls[id]) { try { URL.revokeObjectURL(fullUrls[id]); } catch(e){} delete fullUrls[id]; }
+}
 async function fullUrl(id){
   if (fullUrls[id]) return fullUrls[id];
   var rec = await getOne('photos', id);
@@ -703,36 +724,143 @@ function loadImageElement(file){
     img.src = url;
   });
 }
-async function makeThumb(file){
-  var src = null, w = 0, h = 0, cleanupUrl = null;
+/* ---------- 사진 크기 읽기(디코딩 없이) ---------- */
+/* 파일 머리에서 원본 픽셀 크기를 읽는다. 모르면 null(HEIC 등). */
+function imageSizeFromHeader(blob){
+  return new Promise(function(resolve){
+    try {
+      var fr = new FileReader();
+      fr.onload = function(){
+        try { resolve(parseImageSize(new Uint8Array(fr.result))); }
+        catch (e) { resolve(null); }
+      };
+      fr.onerror = function(){ resolve(null); };
+      fr.readAsArrayBuffer(blob.slice(0, 262144));
+    } catch (e) { resolve(null); }
+  });
+}
+function parseImageSize(b){
+  if (!b || b.length < 24) return null;
+  // JPEG
+  if (b[0] === 0xFF && b[1] === 0xD8) {
+    var i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xFF) { i++; continue; }
+      var m = b[i + 1];
+      if (m === 0xD8 || m === 0xD9 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
+      var len = (b[i + 2] << 8) | b[i + 3];
+      if (len < 2) return null;
+      if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+        var jh = (b[i + 5] << 8) | b[i + 6];
+        var jw = (b[i + 7] << 8) | b[i + 8];
+        return (jw && jh) ? { w: jw, h: jh } : null;
+      }
+      i += 2 + len;
+    }
+    return null;
+  }
+  // PNG
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) {
+    var pw = (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19];
+    var ph = (b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23];
+    return (pw > 0 && ph > 0) ? { w: pw, h: ph } : null;
+  }
+  // WebP
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) {
+    var four = String.fromCharCode(b[12], b[13], b[14], b[15]);
+    if (four === 'VP8X') {
+      var xw = 1 + (b[21] | (b[22] << 8) | (b[23] << 16));
+      var xh = 1 + (b[24] | (b[25] << 8) | (b[26] << 16));
+      return (xw > 1 && xh > 1) ? { w: xw, h: xh } : null;
+    }
+    if (four === 'VP8 ') {
+      var vw = (b[26] | (b[27] << 8)) & 0x3FFF;
+      var vh = (b[28] | (b[29] << 8)) & 0x3FFF;
+      return (vw && vh) ? { w: vw, h: vh } : null;
+    }
+    if (four === 'VP8L') {
+      var bits = (b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24)) >>> 0;
+      var lw = (bits & 0x3FFF) + 1;
+      var lh = ((bits >> 14) & 0x3FFF) + 1;
+      return (lw > 1 && lh > 1) ? { w: lw, h: lh } : null;
+    }
+    return null;
+  }
+  return null;
+}
+
+/* ---------- 축소 디코딩 ---------- */
+/* createImageBitmap 의 resizeWidth/resizeHeight 로 '줄여서' 디코딩한다.
+   큰 사진을 풀사이즈로 디코딩하지 않아 메모리 피크가 크게 줄어든다. */
+async function decodeScaled(source, maxEdge){
   if (typeof createImageBitmap === 'function') {
     try {
-      src = await createImageBitmap(file, { imageOrientation: 'from-image' });
-      w = src.width; h = src.height;
-    } catch (e) { src = null; }
+      var opts = { imageOrientation: 'from-image' };
+      var known = await imageSizeFromHeader(source);
+      if (known) {
+        if (Math.max(known.w, known.h) > maxEdge) {
+          if (known.w >= known.h) opts.resizeWidth = maxEdge;
+          else opts.resizeHeight = maxEdge;
+        }
+      } else {
+        // 크기를 모르는 형식: 64px 미리보기로 가로/세로 방향만 먼저 확인
+        var probe = null;
+        try { probe = await createImageBitmap(source, { imageOrientation: 'from-image', resizeWidth: 64 }); }
+        catch (e) { probe = null; }
+        if (probe) {
+          if (probe.width >= probe.height) opts.resizeWidth = maxEdge;
+          else opts.resizeHeight = maxEdge;
+          try { probe.close(); } catch (e) {}
+        }
+      }
+      var bmp = await createImageBitmap(source, opts);
+      return {
+        img: bmp, w: bmp.width, h: bmp.height,
+        close: function(){ try { bmp.close(); } catch (e) {} }
+      };
+    } catch (e) { /* 아래 <img> 경로로 */ }
   }
-  if (!src) {
-    var loaded = await loadImageElement(file);
-    src = loaded.img; w = loaded.w; h = loaded.h; cleanupUrl = loaded.url;
+  var loaded = await loadImageElement(source);
+  return {
+    img: loaded.img, w: loaded.w, h: loaded.h,
+    close: function(){ try { URL.revokeObjectURL(loaded.url); } catch (e) {} }
+  };
+}
+async function resizeToJpeg(source, maxEdge, quality){
+  var dec = await decodeScaled(source, maxEdge);
+  try {
+    if (!dec.w || !dec.h) throw new Error('size unknown');
+    var scale = Math.min(1, maxEdge / Math.max(dec.w, dec.h));
+    var tw = Math.max(1, Math.round(dec.w * scale));
+    var th = Math.max(1, Math.round(dec.h * scale));
+    var canvas = document.createElement('canvas');
+    canvas.width = tw; canvas.height = th;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, tw, th);
+    if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(dec.img, 0, 0, tw, th);
+    var blob = await new Promise(function(resolve){
+      canvas.toBlob(function(b){ resolve(b); }, 'image/jpeg', quality);
+    });
+    canvas.width = canvas.height = 0; // 캔버스 메모리 즉시 해제
+    return blob;
+  } finally {
+    dec.close();
   }
-  if (!w || !h) throw new Error('size unknown');
-  var scale = Math.min(1, THUMB_MAX / Math.max(w, h));
-  var tw = Math.max(1, Math.round(w * scale));
-  var th = Math.max(1, Math.round(h * scale));
-  var canvas = document.createElement('canvas');
-  canvas.width = tw; canvas.height = th;
-  var ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, tw, th);
-  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(src, 0, 0, tw, th);
-  if (src.close) { try { src.close(); } catch (e) {} }
-  if (cleanupUrl) URL.revokeObjectURL(cleanupUrl);
-  var blob = await new Promise(function(resolve){
-    canvas.toBlob(function(b){ resolve(b); }, 'image/jpeg', THUMB_Q);
-  });
-  canvas.width = canvas.height = 0;
-  return blob;
+}
+async function makeThumb(source){
+  return resizeToJpeg(source, THUMB_MAX, THUMB_Q);
+}
+/* 저장용 사진: 이미 작으면 원본 그대로, 고화소면 최대 변 PHOTO_MAX JPEG 로 줄여서 */
+async function prepareForStore(file){
+  var size = await imageSizeFromHeader(file);
+  var longEdge = size ? Math.max(size.w, size.h) : 0;
+  if (longEdge && longEdge <= PHOTO_MAX) return file;
+  if (!longEdge && file.size && file.size <= 400 * 1024) return file;
+  var blob = await resizeToJpeg(file, PHOTO_MAX, PHOTO_Q);
+  return blob || file;
 }
 
 /* ---------- 화면: 공통 ---------- */
@@ -752,6 +880,7 @@ function render(){
   else renderSearch();
 }
 function goTab(tab){
+  if (S.view === 'record') { S.historyPushed = false; clearHashDay(); }
   S.tab = tab;
   S.view = 'main';
   render();
@@ -854,7 +983,34 @@ function renderCalendar(){
 }
 
 /* ---------- 화면: 기록 ---------- */
-async function openRecord(date){
+/* 화면 상태를 주소에 남긴다(#day=YYYY-MM-DD) — 앱이 새로고침·재시작돼도 같은 날 기록으로 */
+function readHashDay(){
+  var m = /^#day=(\d{4})-(\d{2})-(\d{2})$/.exec(String(location.hash || ''));
+  return m ? m[1] + '-' + m[2] + '-' + m[3] : null;
+}
+function clearHashDay(){
+  try {
+    if (String(location.hash || '').indexOf('#day=') === 0) {
+      history.replaceState(history.state, '', location.pathname + location.search);
+    }
+  } catch (e) {}
+}
+function syncHashDay(date){
+  try {
+    var h = '#day=' + date;
+    if (location.hash === h) {
+      if (!history.state || history.state.record !== date) history.replaceState({ record: date }, '', h);
+      S.historyPushed = true;
+      return;
+    }
+    history.pushState({ record: date }, '', h);
+    S.historyPushed = true;
+  } catch (e) {
+    S.historyPushed = false;
+  }
+}
+
+async function openRecord(date, keepHistory){
   await flushSave();
   S.recordDate = date;
   var day = dayOf(date);
@@ -871,12 +1027,10 @@ async function openRecord(date){
   S.saveState = 'idle';
   render();
   window.scrollTo(0, 0);
-  if (!S.historyPushed) {
-    S.historyPushed = true;
-    try { history.pushState({ record: date }, ''); } catch (e) { S.historyPushed = false; }
-  }
+  if (!keepHistory && !S.historyPushed) syncHashDay(date);
 }
 function closeRecord(){
+  clearHashDay();
   S.view = 'main';
   S.recordDate = null;
   S.draft = null;
@@ -893,6 +1047,13 @@ function backFromRecord(){
   closeRecord();
 }
 window.addEventListener('popstate', function(){
+  if (cam) stopCamera();
+  var hd = readHashDay();
+  if (hd) { // 앞으로가기 등으로 다시 #day= 주소가 되면 그 기록을 연다
+    S.historyPushed = true;
+    if (S.view !== 'record' || S.recordDate !== hd) openRecord(hd, true);
+    return;
+  }
   if (S.view === 'record') {
     S.historyPushed = false;
     flushSave();
@@ -965,7 +1126,7 @@ function renderRecord(){
     '</div>';
 
   $('#rec-back').addEventListener('click', backFromRecord);
-  $('#btn-capture').addEventListener('click', function(){ $('#file-capture').click(); });
+  $('#btn-capture').addEventListener('click', function(){ openCamera(); });
   $('#btn-pick').addEventListener('click', function(){ $('#file-pick').click(); });
   $('#file-capture').addEventListener('change', function(e){ handleFiles(e.target.files); e.target.value = ''; });
   $('#file-pick').addEventListener('change', function(e){ handleFiles(e.target.files); e.target.value = ''; });
@@ -1164,9 +1325,11 @@ async function handleFiles(fileList){
   for (var i = 0; i < total; i++) {
     var f = files[i];
     updateBusy('사진 저장 중… ' + (i + 1) + '/' + total);
+    var stored = f;
+    try { stored = await prepareForStore(f); } catch (e) { stored = f; }
     var thumb = null;
-    try { thumb = await makeThumb(f); } catch (e) { thumb = null; }
-    var rec = { date: date, blob: f, thumb: thumb, order: order++, caption: '' };
+    try { thumb = await makeThumb(stored); } catch (e) { thumb = null; }
+    var rec = { date: date, blob: stored, thumb: thumb, order: order++, caption: '' };
     try {
       var id = await addPhotoRecord(rec);
       var meta = { id: id, date: date, order: rec.order, caption: '', thumb: thumb };
@@ -1187,6 +1350,154 @@ async function handleFiles(fileList){
   if (added && failed) toast(added + '장을 담았어요. ' + failed + '장은 저장하지 못했어요.');
   else if (added) toast(added + '장을 담았어요.');
   else toast('사진을 담지 못했어요. 다른 사진으로 다시 시도해 주세요.');
+}
+
+/* ---------- 앱 안 카메라 ----------
+ * 안드로이드에서 <input type="file" capture>로 외부 카메라 앱을 띄우면
+ * 카메라 앱이 메모리를 많이 써서 뒤에 있던 이 앱이 시스템에 종료된다
+ * ("메모리가 부족하여 이전 작업을 완료할 수 없습니다").
+ * 그래서 앱 안에서 미리보기 + 촬영을 하고, 찍은 뒤 스트림을 바로 끊는다.
+ */
+var cam = null;
+var camBusy = false;
+
+function cameraAvailable(){
+  return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+}
+function cameraFallback(msg){
+  if (msg) toast(msg, 4000);
+  var input = $('#file-capture');
+  if (input) setTimeout(function(){ try { input.click(); } catch (e) {} }, 80);
+}
+function stopCamera(){
+  if (!cam) return;
+  try {
+    if (cam.stream) cam.stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} });
+  } catch (e) {}
+  try { if (cam.video) cam.video.srcObject = null; } catch (e) {}
+  try { if (cam.el && cam.el.parentNode) cam.el.parentNode.removeChild(cam.el); } catch (e) {}
+  document.removeEventListener('keydown', camKeys);
+  cam = null;
+  camBusy = false;
+}
+function closeCamera(){ stopCamera(); }
+function camKeys(e){
+  if (!cam) return;
+  if (e.key === 'Escape') closeCamera();
+}
+async function openCamera(){
+  if (cam) return;
+  if (!S.recordDate) return;
+  if (!cameraAvailable()) {
+    cameraFallback('이 브라우저에서는 앱 안 카메라를 쓸 수 없어요. 휴대폰 카메라로 열게요.');
+    return;
+  }
+  var date = S.recordDate;
+  var el = document.createElement('div');
+  el.className = 'cam';
+  el.id = 'cam';
+  el.innerHTML =
+    '<div class="cam-top">' +
+      '<button class="cam-close" id="cam-close" aria-label="카메라 닫기">✕</button>' +
+      '<span class="cam-title">사진 찍기</span>' +
+      '<span style="width:44px" aria-hidden="true"></span>' +
+    '</div>' +
+    '<div class="cam-stage">' +
+      '<video id="cam-video" playsinline autoplay muted></video>' +
+      '<div class="cam-msg" id="cam-msg">카메라를 준비하고 있어요…</div>' +
+    '</div>' +
+    '<div class="cam-bottom">' +
+      '<button class="shutter" id="cam-shot" aria-label="촬영" disabled></button>' +
+    '</div>';
+  document.body.appendChild(el);
+  cam = { el: el, stream: null, video: $('#cam-video'), date: date };
+  $('#cam-close').addEventListener('click', closeCamera);
+  $('#cam-shot').addEventListener('click', takeShot);
+  document.addEventListener('keydown', camKeys);
+  try {
+    // 고화소 스트림은 그 자체로 메모리를 많이 쓰므로 1920 이하로 요청한다
+    var stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1920 }
+      }
+    });
+    if (!cam) { // 여는 동안 닫렸으면 바로 정리
+      stream.getTracks().forEach(function(tr){ try { tr.stop(); } catch (e) {} });
+      return;
+    }
+    cam.stream = stream;
+    cam.video.srcObject = stream;
+    try { await cam.video.play(); } catch (e) {}
+    var msg = $('#cam-msg');
+    if (msg) msg.hidden = true;
+    var shot = $('#cam-shot');
+    if (shot) shot.disabled = false;
+  } catch (err) {
+    var name = (err && err.name) || '';
+    var text;
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      text = '카메라 권한이 꺼져 있어요. 주소창 옆 자물쇠 → 카메라 → 허용으로 바꾸면 앱 안에서 찍을 수 있어요. 지금은 휴대폰 카메라로 열게요.';
+    } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+      text = '사용할 수 있는 카메라를 찾지 못했어요. 휴대폰 카메라로 열게요.';
+    } else {
+      text = '카메라를 열지 못했어요. 휴대폰 카메라로 열게요.';
+    }
+    stopCamera();
+    cameraFallback(text);
+  }
+}
+async function takeShot(){
+  if (!cam || camBusy) return;
+  var v = cam.video;
+  var vw = v ? v.videoWidth : 0;
+  var vh = v ? v.videoHeight : 0;
+  if (!vw || !vh) {
+    toast('카메라 화면이 아직 준비되지 않았어요. 잠시 뒤 다시 눌러 주세요.');
+    return;
+  }
+  camBusy = true;
+  var shotBtn = $('#cam-shot');
+  if (shotBtn) shotBtn.disabled = true;
+  var date = cam.date;
+  var scale = Math.min(1, CAPTURE_MAX / Math.max(vw, vh));
+  var cw = Math.max(1, Math.round(vw * scale));
+  var ch = Math.max(1, Math.round(vh * scale));
+  var canvas = document.createElement('canvas');
+  canvas.width = cw; canvas.height = ch;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, cw, ch);
+  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(v, 0, 0, cw, ch);
+  var blob = await new Promise(function(resolve){
+    canvas.toBlob(function(b){ resolve(b); }, 'image/jpeg', PHOTO_Q);
+  });
+  canvas.width = canvas.height = 0;
+  stopCamera(); // 찍자마자 카메라 메모리를 돌려준다
+  if (!blob) { toast('사진을 담지 못했어요. 다시 찍어 주세요.'); return; }
+  showBusy('사진 저장 중…');
+  try {
+    var thumb = null;
+    try { thumb = await makeThumb(blob); } catch (e) { thumb = null; }
+    var order = S.recordPhotos.reduce(function(m, p){ return Math.max(m, p.order || 0); }, -1) + 1;
+    var id = await addPhotoRecord({ date: date, blob: blob, thumb: thumb, order: order, caption: '' });
+    var meta = { id: id, date: date, order: order, caption: '', thumb: thumb };
+    S.recordPhotos.push(meta);
+    S.photoIndex.push(meta);
+    hideBusy();
+    if (S.view === 'record' && S.recordDate === date) {
+      renderPhotoGrid();
+      await saveOrderValues(normalizeOrders());
+    }
+    toast('1장을 담았어요.');
+  } catch (e) {
+    console.error('촬영 저장 실패', e);
+    hideBusy();
+    toast('사진을 저장하지 못했어요. 휴대폰 저장 공간을 확인해 주세요.');
+  }
 }
 
 /* ---------- 라이트박스 ---------- */
@@ -1236,6 +1547,7 @@ function lbKeys(e){
 }
 function closeLightbox(){
   document.removeEventListener('keydown', lbKeys);
+  if (S.lb && S.lb.prevFullId) forgetFull(S.lb.prevFullId);
   var el = $('#lb');
   if (el) el.remove();
   S.lb = null;
@@ -1266,6 +1578,9 @@ async function lbShow(){
   var t = thumbUrl(p);
   if (t) { img.src = t; img.hidden = false; }
   else { img.removeAttribute('src'); img.hidden = true; }
+  // 앞 사진의 풀사이즈 objectURL 은 바로 정리해 누적되지 않게
+  if (S.lb.prevFullId && S.lb.prevFullId !== p.id) forgetFull(S.lb.prevFullId);
+  S.lb.prevFullId = p.id;
   var day = dayOf(p.date) || {};
   var bits = [];
   if (day.place) bits.push(day.place);
@@ -1728,23 +2043,55 @@ async function reloadAll(){
   var res = await Promise.all([getAll('days'), getAll('photoIndex')]);
   S.days = res[0];
   S.photoIndex = res[1];
+  // 사라진 사진의 objectURL 정리(메모리 누수 방지)
+  var alive = {};
+  S.photoIndex.forEach(function(p){ alive[p.id] = true; });
+  Object.keys(thumbUrls).forEach(function(id){ if (!alive[id]) forgetThumb(id); });
+  Object.keys(fullUrls).forEach(function(id){ if (!alive[id]) forgetFull(id); });
 }
 function bindGlobal(){
   $all('.tab', $('#tabbar')).forEach(function(b){
     b.addEventListener('click', function(){ goTab(b.getAttribute('data-tab')); });
   });
   document.addEventListener('visibilitychange', function(){
-    if (document.hidden) flushSave();
+    // 다른 앱으로 갈 때 카메라 스트림과 타이핑 중 저장을 마무리한다
+    if (document.hidden) { if (cam) stopCamera(); flushSave(); }
   });
 }
 function registerSW(){
   if (!('serviceWorker' in navigator)) return;
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  var hadController = !!navigator.serviceWorker.controller;
+  var reloading = false;
   var go = function(){
-    navigator.serviceWorker.register('sw.js').catch(function(e){
+    navigator.serviceWorker.register('sw.js').then(function(reg){
+      if (!reg) return;
+      // 설치가 끝난 새 버전은 바로 넘겨받는다(skipWaiting + clients.claim)
+      try { if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+      reg.addEventListener('updatefound', function(){
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function(){
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            try { nw.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+          }
+        });
+      });
+      // 업데이트가 있으면 바로 확인해 받아온다
+      if (reg.update) { try { reg.update(); } catch (e) {} }
+    }).catch(function(e){
       console.warn('서비스 워커 등록 실패', e);
     });
   };
+  if (hadController) {
+    // 이미 설치된 앱을 새 버전으로 바꿀 때: 입력 중이던 내용을 저장하고 한 번만 새로고침
+    navigator.serviceWorker.addEventListener('controllerchange', function(){
+      if (reloading) return;
+      reloading = true;
+      var done = function(){ try { location.reload(); } catch (e) {} };
+      try { flushSave().then(done, done); } catch (e) { done(); }
+    });
+  }
   if (document.readyState === 'complete') go();
   else window.addEventListener('load', go);
 }
@@ -1762,7 +2109,14 @@ async function boot(){
     return;
   }
   bindGlobal();
-  render();
+  var hashDay = readHashDay();
+  if (hashDay) {
+    // 새로고침·다시 열기 뒤에도 보던 날짜 기록 화면을 그대로 보여 준다
+    S.historyPushed = true;
+    await openRecord(hashDay, true);
+  } else {
+    render();
+  }
   registerSW();
 }
 
