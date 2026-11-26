@@ -1047,7 +1047,7 @@ function backFromRecord(){
   closeRecord();
 }
 window.addEventListener('popstate', function(){
-  if (cam) stopCamera();
+  if (cam) { stopCamera(); return; } // 뒤로 가기 = 카메라만 닫기
   var hd = readHashDay();
   if (hd) { // 앞으로가기 등으로 다시 #day= 주소가 되면 그 기록을 연다
     S.historyPushed = true;
@@ -1380,7 +1380,12 @@ function stopCamera(){
   cam = null;
   camBusy = false;
 }
-function closeCamera(){ stopCamera(); }
+/* 카메라를 닫으면(✕·촬영 후) 쌓아 둔 히스토리 한 칸도 같이 되돌린다 */
+function closeCamera(){
+  var pushed = !!(cam && cam.historyPushed);
+  stopCamera();
+  if (pushed) { try { history.back(); } catch (e) {} }
+}
 function camKeys(e){
   if (!cam) return;
   if (e.key === 'Escape') closeCamera();
@@ -1410,7 +1415,12 @@ async function openCamera(){
       '<button class="shutter" id="cam-shot" aria-label="촬영" disabled></button>' +
     '</div>';
   document.body.appendChild(el);
-  cam = { el: el, stream: null, video: $('#cam-video'), date: date };
+  cam = { el: el, stream: null, video: $('#cam-video'), date: date, historyPushed: false };
+  // 안드로이드 뒤로 가기가 카메라만 닫도록 히스토리에 한 칸을 남긴다
+  try {
+    history.pushState({ record: date, camera: true }, '', '#day=' + date);
+    cam.historyPushed = true;
+  } catch (e) { cam.historyPushed = false; }
   $('#cam-close').addEventListener('click', closeCamera);
   $('#cam-shot').addEventListener('click', takeShot);
   document.addEventListener('keydown', camKeys);
@@ -1476,7 +1486,9 @@ async function takeShot(){
     canvas.toBlob(function(b){ resolve(b); }, 'image/jpeg', PHOTO_Q);
   });
   canvas.width = canvas.height = 0;
+  var hadHistory = !!(cam && cam.historyPushed);
   stopCamera(); // 찍자마자 카메라 메모리를 돌려준다
+  if (hadHistory) { try { history.back(); } catch (e) {} }
   if (!blob) { toast('사진을 담지 못했어요. 다시 찍어 주세요.'); return; }
   showBusy('사진 저장 중…');
   try {
