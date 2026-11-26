@@ -1,0 +1,27 @@
+{
+  "name": "사진 다이어리",
+  "short_name": "사진 다이어리",
+  "description": "날짜별로 사진과 기록을 남기는 나만의 사진 다이어리. 기록은 휴대폰 안에만 저장됩니다.",
+  "lang": "ko",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FBF7F0",
+  "theme_color": "#FBF7F0",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
