@@ -3,7 +3,7 @@
  * 파일을 고칠 때는 아래 CACHE_VERSION 을 올리세요 (예: v1 → v2).
  * 사진과 기록은 IndexedDB에 있어서 이 캐시와는 별개입니다.
  */
-const CACHE_VERSION = 'photo-diary-v3';
+const CACHE_VERSION = 'photo-diary-v4';
 const ASSETS = [
   './',
   './index.html',

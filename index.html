@@ -284,6 +284,15 @@ body.no-tab .tabbar{display:none}
 }
 .lb-navrow button:disabled{opacity:.25}
 .lb-navrow .mid{font-size:12.5px;color:rgba(255,255,255,.55);min-width:46px;text-align:center}
+.lb-actions{display:flex;justify-content:center;padding:2px 0 0}
+.lb-save{
+  display:inline-flex;align-items:center;gap:7px;height:42px;padding:0 18px;border-radius:21px;
+  border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);
+  color:#fff;font-size:13.5px;font-weight:600
+}
+.lb-save:active{background:rgba(255,255,255,.22)}
+.lb-save[disabled]{opacity:.5}
+.lb-save svg{width:17px;height:17px}
 
 /* ---------- 앱 안 카메라 ---------- */
 .cam{position:fixed;inset:0;z-index:75;background:#0B0A08;display:flex;flex-direction:column;color:#fff}
@@ -303,7 +312,8 @@ body.no-tab .tabbar{display:none}
 .cam-flash.on{opacity:.9;transition:none}
 .cam-msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;font-size:14px;line-height:1.6;color:rgba(255,255,255,.82)}
 .cam-strip{display:flex;align-items:center;gap:10px;padding:10px 16px 0;min-height:46px}
-.cam-count{font-size:12.5px;color:rgba(255,255,255,.74);white-space:nowrap}
+.cam-count{font-size:12.5px;color:rgba(255,255,255,.74);white-space:nowrap;display:flex;flex-direction:column;line-height:1.25}
+.cam-count .cam-sub{font-style:normal;font-size:10.5px;color:rgba(255,255,255,.5);margin-top:2px}
 .cam-thumbs{display:flex;align-items:center;gap:6px;flex:1;min-height:44px;overflow-x:auto;justify-content:flex-end}
 .cam-thumbs img{width:44px;height:44px;object-fit:cover;border-radius:10px;border:1px solid rgba(255,255,255,.28);flex:0 0 auto}
 .cam-thumbs .slot{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.1);display:grid;place-items:center;font-size:10px;color:rgba(255,255,255,.62);flex:0 0 auto}
@@ -337,6 +347,19 @@ body.no-tab .tabbar{display:none}
 .sheet-row p{font-size:12.5px;color:var(--ink2);margin:0 0 10px;line-height:1.6}
 .sheet-row .btns{display:flex;gap:8px}
 .sheet-row .btns .btn{flex:1}
+.sheet-row .sw-row{display:flex;align-items:flex-start;gap:12px}
+.sheet-row .sw-row .tx{flex:1;min-width:0}
+.sheet-row .sw-row .tx p{margin-bottom:0}
+.sw{
+  position:relative;flex:0 0 auto;width:52px;height:31px;border-radius:999px;
+  background:var(--line);transition:background .18s ease;margin-top:3px
+}
+.sw::after{
+  content:'';position:absolute;top:3px;left:3px;width:25px;height:25px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 3px rgba(60,40,20,.3);transition:transform .18s ease
+}
+.sw[aria-checked="true"]{background:var(--accent)}
+.sw[aria-checked="true"]::after{transform:translateX(21px)}
 .modal{
   background:var(--card);border-radius:18px;padding:20px;max-width:340px;width:100%;
   box-shadow:0 20px 50px rgba(0,0,0,.25)
@@ -388,7 +411,8 @@ body.no-tab .tabbar{display:none}
    ============================================================ */
 
 /* ---------- 상수 ---------- */
-var APP_VERSION = '1.2.0';
+var APP_VERSION = '1.3.0';
+var DL_REVOKE_MS = 10000; // 연속 촬영 때 다운로드가 씹히지 않도록 objectURL 은 늦게 해제한다
 var DB_NAME = 'photo-diary';
 var DB_VER = 1;
 var THUMB_MAX = 480;
@@ -626,6 +650,68 @@ async function fullUrl(id){
   if (!rec || !rec.blob) return '';
   fullUrls[id] = URL.createObjectURL(rec.blob);
   return fullUrls[id];
+}
+
+/* ---------- 갤러리(다운로드) 저장 ----------
+ * 찍은 사진을 휴대폰의 Download 폴더(=갤러리)에도 남긴다.
+ * <a download>로 내려받으면 안드로이드 크롬에서는 다운로드 폴더에 저장되고
+ * 갤러리 앱에 바로 보인다.
+ */
+var PREFS_KEY = 'photo-diary:prefs';
+var prefs = { gallerySave: true }; // 기본값 켜짐
+var dlPending = [];
+var dlLastSec = '';
+var dlSecCount = 0;
+
+function loadPrefs(){
+  try {
+    var raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return;
+    var o = JSON.parse(raw);
+    if (o && typeof o.gallerySave === 'boolean') prefs.gallerySave = o.gallerySave;
+  } catch (e) { /* 저장소를 못 쓰는 브라우저는 기본값으로 */ }
+}
+function savePrefs(){
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify({ gallerySave: !!prefs.gallerySave })); } catch (e) {}
+}
+loadPrefs();
+
+/* 다이어리-YYYYMMDD-HHMMSS-순번.jpg
+ * 같은 초에 여러 장 찍어도 순번이 올라가 이름이 겹치지 않는다.
+ * (브라우저도 같은 이름이 있으면 (1)을 붙여 준다)
+ */
+function photoFileName(date){
+  var now = new Date();
+  var day = String(date || '').replace(/[^0-9]/g, '');
+  if (day.length !== 8) day = ymd(now).replace(/-/g, '');
+  var sec = pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds());
+  if (sec !== dlLastSec) { dlLastSec = sec; dlSecCount = 0; }
+  dlSecCount += 1;
+  return '다이어리-' + day + '-' + sec + '-' + pad2(dlSecCount) + '.jpg';
+}
+/* 파일 하나를 내려받는다. objectURL 은 충분히(10초) 뒤에 해제한다. */
+function downloadBlob(blob, name){
+  if (!blob || !name) return '';
+  try {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    dlPending.push({ url: url, a: a, name: name });
+    setTimeout(function(){
+      try { if (a.parentNode) a.parentNode.removeChild(a); } catch (e) {}
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      dlPending = dlPending.filter(function(x){ return x.url !== url; });
+    }, DL_REVOKE_MS);
+    return name;
+  } catch (e) {
+    console.warn('갤러리 저장 실패', e);
+    return '';
+  }
 }
 
 /* ---------- 데이터 조회 도우미 ---------- */
@@ -1482,7 +1568,9 @@ async function switchCamera(){
 }
 function camCountText(){
   var c = $('#cam-count');
-  if (c) c.textContent = ((cam && cam.saved) || 0) + '장 저장됨';
+  if (!c) return;
+  var n = (cam && cam.saved) || 0;
+  c.innerHTML = esc(n + '장 저장됨') + (prefs.gallerySave ? '<em class="cam-sub">갤러리에도 저장</em>' : '');
 }
 function camFlash(){
   var f = $('#cam-flash');
@@ -1528,8 +1616,9 @@ async function openCamera(){
   document.body.appendChild(el);
   cam = {
     el: el, stream: null, video: $('#cam-video'), date: date, historyPushed: false,
-    facing: 'environment', saved: 0, urls: [], switching: false
+    facing: 'environment', saved: 0, gallerySaved: 0, urls: [], switching: false
   };
+  camCountText();
   // 안드로이드 뒤로 가기가 카메라만 닫도록 히스토리에 한 칸을 남긴다
   try {
     history.pushState({ record: date, camera: true }, '', '#day=' + date);
@@ -1605,6 +1694,11 @@ async function takeShot(){
     toast('사진을 담지 못했어요. 다시 찍어 주세요.');
     return;
   }
+  // 다이어리 저장과 함께 기기 갤러리(다운로드 폴더)에도 바로 저장한다.
+  // 썸네일·IndexedDB 저장을 기다리지 않고 지금 내려받아야
+  // 브라우저가 '사용자 조작'으로 인정해 연속 촬영에서도 다운로드가 막히지 않는다.
+  var galleryName = '';
+  if (prefs.gallerySave) galleryName = downloadBlob(blob, photoFileName(date));
   var slot = document.createElement('span');
   slot.className = 'slot';
   slot.textContent = '저장';
@@ -1624,6 +1718,7 @@ async function takeShot(){
     }
     if (!cam) return; // 저장하는 사이 닫혔으면 화면에 표시할 곳이 없다
     cam.saved = (cam.saved || 0) + 1;
+    cam.gallerySaved = (cam.gallerySaved || 0) + (galleryName ? 1 : 0);
     camCountText();
     if (slot.parentNode) {
       if (thumb) {
@@ -1661,6 +1756,9 @@ function openLightbox(items, index){
     '<div class="lb-top"><span class="lb-count" id="lb-count"></span><button class="lb-close" id="lb-close" aria-label="닫기">✕</button></div>' +
     '<div class="lb-stage" id="lb-stage"><img id="lb-img" alt=""></div>' +
     '<div class="lb-cap"><div class="lb-date" id="lb-date"></div><div class="lb-text" id="lb-text"></div></div>' +
+    '<div class="lb-actions"><button class="lb-save" id="lb-save">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M8 10.5l4 4 4-4"/><path d="M5 18.5h14"/></svg>' +
+      '<span id="lb-save-tx">갤러리 저장</span></button></div>' +
     '<div class="lb-navrow">' +
       '<button id="lb-prev" aria-label="이전 사진">‹</button>' +
       '<span class="mid" id="lb-mid"></span>' +
@@ -1668,6 +1766,7 @@ function openLightbox(items, index){
     '</div>';
   document.body.appendChild(el);
   $('#lb-close').addEventListener('click', closeLightbox);
+  $('#lb-save').addEventListener('click', lbSaveToGallery);
   $('#lb-prev').addEventListener('click', function(){ lbGo(-1); });
   $('#lb-next').addEventListener('click', function(){ lbGo(1); });
   var stage = $('#lb-stage');
@@ -1694,6 +1793,31 @@ function lbKeys(e){
   if (e.key === 'Escape') closeLightbox();
   else if (e.key === 'ArrowLeft') lbGo(-1);
   else if (e.key === 'ArrowRight') lbGo(1);
+}
+/* 크게 보기에서 보고 있는 사진을 기기 갤러리(다운로드 폴더)로 꺼낸다 */
+async function lbSaveToGallery(){
+  if (!S.lb) return;
+  var p = S.lb.items[S.lb.i];
+  if (!p) return;
+  var btn = $('#lb-save');
+  if (btn) btn.disabled = true;
+  try {
+    var rec = await getOne('photos', p.id);
+    if (!rec || !rec.blob) throw new Error('사진을 찾지 못했습니다');
+    var name = downloadBlob(rec.blob, photoFileName(p.date || rec.date));
+    if (!name) throw new Error('내려받기를 시작하지 못했습니다');
+    var tx = $('#lb-save-tx');
+    if (tx) {
+      tx.textContent = '저장했어요';
+      setTimeout(function(){ if (tx.isConnected) tx.textContent = '갤러리 저장'; }, 1800);
+    }
+    toast('갤러리에 저장했어요 · ' + name, 3200);
+  } catch (e) {
+    console.error('갤러리 저장 실패', e);
+    toast('갤러리에 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+  } finally {
+    setTimeout(function(){ if (btn && btn.isConnected) btn.disabled = false; }, 700);
+  }
 }
 function closeLightbox(){
   document.removeEventListener('keydown', lbKeys);
@@ -1968,6 +2092,15 @@ function openSettings(){
       '<h2>설정</h2>' +
       '<p class="sub">기록 ' + S.days.length + '일 · 사진 ' + S.photoIndex.length + '장 · 앱 v' + APP_VERSION + '</p>' +
       '<div class="sheet-row">' +
+        '<div class="sw-row">' +
+          '<div class="tx">' +
+            '<h3>찍은 사진 기기(갤러리)에도 자동 저장</h3>' +
+            '<p>사진을 찍을 때마다 다이어리와 함께 휴대폰 갤러리(다운로드 폴더)에도 저장해요. 끄면 다이어리에만 저장되고, 이미 있는 사진은 크게 보기의 <b>갤러리 저장</b>으로 하나씩 꺼낼 수 있어요.</p>' +
+          '</div>' +
+          '<button class="sw" id="sw-gallery" role="switch" aria-checked="' + (prefs.gallerySave ? 'true' : 'false') + '" aria-label="찍은 사진 기기(갤러리)에도 자동 저장"></button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="sheet-row">' +
         '<h3>전체 내보내기</h3>' +
         '<p>모든 기록과 사진(원본)을 JSON 파일 하나로 저장해요. 사진이 많으면 파일이 수십 MB까지 커질 수 있고, 내보내는 동안 잠시 느려질 수 있어요. 이 파일은 다른 곳에 백업해 두면 휴대폰을 바꿀 때 다시 살릴 수 있어요.</p>' +
         '<div class="btns"><button class="btn" id="btn-export">JSON으로 내보내기</button></div>' +
@@ -1994,6 +2127,12 @@ function openSettings(){
   $('#btn-close-x').addEventListener('click', close);
   wrap.addEventListener('click', function(e){ if (e.target === wrap) close(); });
   $('#btn-export').addEventListener('click', function(){ exportAll(); });
+  $('#sw-gallery').addEventListener('click', function(){
+    prefs.gallerySave = !prefs.gallerySave;
+    savePrefs();
+    this.setAttribute('aria-checked', prefs.gallerySave ? 'true' : 'false');
+    toast(prefs.gallerySave ? '찍은 사진을 갤러리에도 저장해요.' : '이제 다이어리에만 저장해요.', 2600);
+  });
   $('#btn-import').addEventListener('click', function(){ $('#file-import').click(); });
   $('#file-import').addEventListener('change', function(e){
     var f = e.target.files && e.target.files[0];
@@ -2274,9 +2413,11 @@ async function boot(){
 window.__diary = {
   state: S,
   version: APP_VERSION,
+  prefs: prefs,
   koreanDate: koreanDate,
   todayStr: todayStr,
-  reloadAll: reloadAll
+  reloadAll: reloadAll,
+  pendingDownloads: function(){ return dlPending.map(function(x){ return x.name; }); }
 };
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
